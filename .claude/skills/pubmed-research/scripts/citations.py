@@ -9,7 +9,38 @@ A normalized record is the dict produced by pubmed_parse.parse_article.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
+
+
+# ─── BibTeX / LaTeX escaping ─────────────────────────────────────────────────
+# A .bib field is LaTeX source, and biomedical titles are full of characters that
+# LaTeX reads as markup. '%' is the dangerous one: it opens a comment, so
+# `title = {The neglected 95%: ...}` swallows the closing brace and the comma with
+# it, and BibTeX keeps parsing into the next entry. Nothing warns; the
+# bibliography simply comes out wrong.
+_LATEX_SPECIAL = {
+    "\\": r"\textbackslash{}",
+    "&": r"\&",
+    "%": r"\%",
+    "$": r"\$",
+    "#": r"\#",
+    "_": r"\_",
+    "{": r"\{",
+    "}": r"\}",
+    "~": r"\textasciitilde{}",
+    "^": r"\textasciicircum{}",
+}
+# One pass over the string: each character is rewritten once, so the braces and
+# backslashes introduced by a replacement are never themselves re-escaped. A
+# sequence of .replace() calls cannot do this — whichever runs first corrupts the
+# output of the ones after it.
+_LATEX_RE = re.compile("|".join(re.escape(k) for k in _LATEX_SPECIAL))
+
+
+def _tex(value: Any) -> str:
+    """Escape a string for use inside a BibTeX field value."""
+    return _LATEX_RE.sub(lambda m: _LATEX_SPECIAL[m.group()], str(value or ""))
 
 
 def _authors_vancouver(authors: List[Dict[str, Any]], limit: int = 6) -> str:
@@ -19,7 +50,10 @@ def _authors_vancouver(authors: List[Dict[str, Any]], limit: int = 6) -> str:
         initials = a.get("initials", "")
         if not initials and a.get("firstName"):
             initials = "".join(p[0] for p in a["firstName"].split() if p)
-        names.append(f"{last} {initials}".strip() if last else a.get("name", ""))
+        # ICMJE keeps the generational suffix, unpunctuated, after the initials:
+        # 'Glass DA 2nd'.
+        names.append(" ".join(p for p in (last, initials, a.get("suffix", "")) if p)
+                     if last else a.get("name", ""))
     names = [n for n in names if n]
     if len(names) > limit:
         return ", ".join(names[:limit]) + ", et al"
@@ -35,7 +69,13 @@ def _authors_apa(authors: List[Dict[str, Any]]) -> str:
             initials = "".join(f"{p[0]}." for p in a["firstName"].split() if p)
         elif initials:
             initials = "".join(f"{ch}." for ch in initials)
-        parts.append(f"{last}, {initials}".strip().rstrip(",") if last else a.get("name", ""))
+        if last:
+            entry = f"{last}, {initials}".strip().rstrip(",")
+            if a.get("suffix"):
+                entry += f", {a['suffix']}"
+        else:
+            entry = a.get("name", "")
+        parts.append(entry)
     parts = [p for p in parts if p]
     if not parts:
         return ""
@@ -115,6 +155,8 @@ def format_mla(rec: Dict[str, Any]) -> str:
     if authors:
         first = authors[0]
         lead = f"{first.get('lastName','')}, {first.get('firstName','')}".strip().rstrip(",")
+        if first.get("suffix"):
+            lead += f", {first['suffix']}"
         if len(authors) > 1:
             lead += ", et al"
     else:
@@ -144,32 +186,61 @@ def format_mla(rec: Dict[str, Any]) -> str:
     return " ".join(cite.split())
 
 
+def _bibtex_author(a: Dict[str, Any]) -> str:
+    last = a.get("lastName", "")
+    if last:
+        # BibTeX has a slot of its own for the suffix — the three-part
+        # 'Last, Jr, First' form. Appending it to the first name instead would
+        # render 'David A. 2nd' as a given name.
+        if a.get("suffix"):
+            return _tex(f"{last}, {a['suffix']}, {a.get('firstName', '')}".rstrip(", "))
+        return _tex(f"{last}, {a.get('firstName', '')}".strip().rstrip(","))
+    # A group author ('SURMOUNT-1 Investigators') carries no lastName, only name.
+    # Selecting on lastName drops it silently — and on a large trial the group is
+    # part of the citation. The extra braces are load-bearing: they tell BibTeX
+    # the string is one literal name, otherwise it splits it into first/last and
+    # renders 'Investigators, SURMOUNT-1'.
+    name = a.get("name", "")
+    return "{%s}" % _tex(name) if name else ""
+
+
+def _bibtex_key(rec: Dict[str, Any]) -> str:
+    authors = rec.get("authors") or []
+    lead = ""
+    if authors:
+        lead = authors[0].get("lastName") or authors[0].get("name") or ""
+    year = (rec.get("journal") or {}).get("year", "")
+    # The key is BibTeX syntax rather than a field value, so it cannot carry
+    # escapes — strip to characters that are always safe instead. A key of ''
+    # (group-led paper) or a bare year collides across entries, so fall back to
+    # the PMID, which is unique by construction.
+    key = re.sub(r"[^A-Za-z0-9]", "", f"{lead}{year}")
+    return key if lead else f"ref{rec.get('pmid', '')}".strip() or "ref"
+
+
 def format_bibtex(rec: Dict[str, Any]) -> str:
     j = rec.get("journal", {})
     authors = " and ".join(
-        f"{a.get('lastName','')}, {a.get('firstName','')}".strip().rstrip(",")
-        for a in rec.get("authors", []) if a.get("lastName")
+        s for s in (_bibtex_author(a) for a in rec.get("authors", [])) if s
     )
-    first_author = rec.get("authors", [{}])[0].get("lastName", "ref") if rec.get("authors") else "ref"
-    key = f"{first_author}{j.get('year','')}".replace(" ", "")
-    lines = [f"@article{{{key},"]
+    lines = [f"@article{{{_bibtex_key(rec)},"]
     if authors:
         lines.append(f"  author = {{{authors}}},")
-    lines.append(f"  title = {{{rec.get('title','')}}},")
+    lines.append(f"  title = {{{_tex(rec.get('title', ''))}}},")
     if j.get("title"):
-        lines.append(f"  journal = {{{j['title']}}},")
+        lines.append(f"  journal = {{{_tex(j['title'])}}},")
     if j.get("year"):
-        lines.append(f"  year = {{{j['year']}}},")
+        lines.append(f"  year = {{{_tex(j['year'])}}},")
     if j.get("volume"):
-        lines.append(f"  volume = {{{j['volume']}}},")
+        lines.append(f"  volume = {{{_tex(j['volume'])}}},")
     if j.get("issue"):
-        lines.append(f"  number = {{{j['issue']}}},")
+        lines.append(f"  number = {{{_tex(j['issue'])}}},")
     if j.get("pages"):
-        lines.append(f"  pages = {{{j['pages']}}},")
+        lines.append(f"  pages = {{{_tex(j['pages'])}}},")
     if rec.get("doi"):
-        lines.append(f"  doi = {{{rec['doi']}}},")
+        lines.append(f"  doi = {{{_tex(rec['doi'])}}},")
     if rec.get("pmid"):
-        lines.append(f"  pmid = {{{rec['pmid']}}},")
+        lines.append(f"  pmid = {{{_tex(rec['pmid'])}}},")
     lines.append("}")
     return "\n".join(lines)
 
@@ -181,7 +252,15 @@ def format_ris(rec: Dict[str, Any]) -> str:
         last = a.get("lastName", "")
         fore = a.get("firstName", "")
         if last:
-            lines.append(f"AU  - {last}, {fore}".rstrip(", "))
+            # RIS name form is 'Last, First, Suffix'.
+            entry = f"{last}, {fore}".rstrip(", ")
+            if a.get("suffix"):
+                entry += f", {a['suffix']}"
+            lines.append(f"AU  - {entry}")
+        elif a.get("name"):
+            # Group author. Written without a comma, which is how RIS readers
+            # tell a corporate name from a 'Last, First' personal one.
+            lines.append(f"AU  - {a['name']}")
     lines.append(f"TI  - {rec.get('title','')}")
     if j.get("title"):
         lines.append(f"JO  - {j['title']}")

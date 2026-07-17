@@ -33,7 +33,11 @@ fails that way, tell the user to run the skill in a local environment.
    - `UNPAYWALL_EMAIL` — enables the third-stage Unpaywall fallback in `fulltext`.
 
    With no `.env` at all, everything still works at 3 req/s. Never hard-code keys
-   in commands or commit `.env` — it is git-ignored for that reason.
+   in commands or commit `.env` — it is git-ignored for that reason. Pass the key
+   through `.env` or the environment, never on the command line: an argument is
+   visible to every process on the machine and lands in shell history. The scripts
+   redact `api_key`/`email` from error output, so a failed call will not echo the
+   key back into stdout, stderr, a transcript or a report.
 
 ## Running the tools
 
@@ -45,13 +49,13 @@ the skill. From there every command takes the form
 
 | Subcommand | What it does | Backing API |
 |------------|--------------|-------------|
-| `search` | Search PubMed; returns PMIDs (+ optional full metadata via `--summaries`). Supports author/journal/MeSH/pubtype/language/species/date filters, `--has-abstract`, `--free-full-text`, and `--offset` paging. Multiple `--mesh` terms are AND'd; multiple `--pubtype` values are OR'd. `--min-date`/`--max-date` may be given alone for an open-ended range. Output carries `queryTranslation` — read it, see "Building a search strategy". | ESearch |
-| `fetch` | Full metadata for one or more PMIDs: title, structured abstract, authors with deduplicated affiliations, journal, IDs, MeSH, publication types. `--include-grants` adds funding records. Batches up to 200 (auto-POST at ≥100). | EFetch |
-| `fulltext` | Open-access full text for up to 10 PMIDs/PMCIDs/DOIs via a 3-stage chain: **PMC EFetch → Europe PMC fullTextXML → Unpaywall**. Returns structured `sections` for the JATS stages; `--sections`, `--max-sections`, `--include-references` filter them. IDs past the 10th are dropped and named in `notice` — re-run for them. | PMC / EPMC / Unpaywall |
+| `search` | Search PubMed; returns PMIDs (+ optional full metadata via `--summaries`). Supports author/journal/MeSH/pubtype/language/species/date filters, `--has-abstract`, `--free-full-text`, `--exclude-animals`, and `--offset` paging. Prefer `--exclude-animals` to `--species humans` when recall matters — see "Building a search strategy". Multiple `--mesh` terms are AND'd; multiple `--pubtype` values are OR'd. `--min-date`/`--max-date` may be given alone for an open-ended range. `--sort` takes `relevance` (default), `pub_date`, `author`, or `journal`. Output carries `queryTranslation` — read it, see "Building a search strategy". | ESearch |
+| `fetch` | Full metadata for one or more PMIDs: title, structured abstract, authors with deduplicated affiliations, journal, IDs, MeSH, publication types. `--include-grants` adds funding records, `--no-mesh` drops MeSH terms. Batches up to 200 (auto-POST at ≥100). PMIDs PubMed has no record for are named in `notFound` — `count` is what arrived, not what was asked for. | EFetch |
+| `fulltext` | Open-access full text for up to 10 PMIDs/PMCIDs/DOIs via a 3-stage chain: **PMC EFetch → Europe PMC fullTextXML → Unpaywall**. Returns structured `sections` for the JATS stages; `--sections`, `--max-sections`, `--include-references` filter them. IDs past the 10th are dropped and named in `notice` — re-run for them. An unknown PMID returns `error: id_not_found`, which is not the same as having no full text. | PMC / EPMC / Unpaywall |
 | `epmc-search` | Search Europe PMC for preprints (`PPR`), patents (`PAT`), Agricola (`AGR`), and EPMC-only OA records that don't surface in PubMed. Cursor paging via `--cursor`; `--sort`, `--result-type`. | Europe PMC |
 | `convert-ids` | Convert between DOI / PMID / PMCID (50 IDs per request; only articles indexed in PMC). Mixed-type batches are grouped automatically. | PMC ID Converter |
 | `related` | Find `similar`, `cited_by`, or `references` articles for a source PMID, with `--offset` paging. Returns brief summaries by default (`--fetch` for full metadata, `--pmids-only` for IDs). Provider chain: ELink, then Europe PMC (`cited_by`/`references` only), then OpenAlex. First success wins; results are never merged. | ELink → Europe PMC → OpenAlex |
-| `cite` | Format citations for PMIDs. Default style **vancouver**; also `apa`, `mla`, `bibtex`, `ris` (pass multiple with `--style`). | EFetch + in-code formatting |
+| `cite` | Format citations for PMIDs. Default style **vancouver** (6 authors then et al., per ICMJE); also `apa`, `mla`, `bibtex`, `ris` (pass multiple with `--style`). BibTeX field values are LaTeX-escaped and group authors are brace-wrapped, so a title carrying `%` or `&` cannot break the `.bib`. Shares `fetch`'s `notFound`: a PMID with no record yields no citation, so check it before pasting the list into a bibliography. | EFetch + in-code formatting |
 | `lookup-cite` | Resolve a partial reference (journal/year/volume/page/author) to a PMID — deterministic matching, more reliable than free-text search. Batch up to 25 with repeated `--citation`. | ECitMatch |
 | `mesh` | Search the MeSH vocabulary — descriptors **and** qualifiers/subheadings, told apart by `recordType`. Returns tree numbers, scope notes, entry terms, and on a descriptor the `allowableQualifiers` it legally takes. An exact heading match is hoisted to the front of the list. | ESearch/ESummary (mesh db) |
 | `spell` | Spell-check a query and get NCBI's suggested correction. | ESpell |
@@ -75,12 +79,14 @@ that Excel may reformat date-like cells (volume/issue/pages) on open — importi
 as text avoids that. For a hard guarantee against auto-conversion, build an
 `.xlsx` with string-typed cells via the xlsx skill instead.
 
-`to_csv.py` also accepts the output of `fetch`, `related`, `fulltext`, and
-`epmc-search`. Bare `related` carries only brief summaries, so its CSV fills
+`to_csv.py` also accepts the output of `fetch`, `related`, and `epmc-search`.
+Bare `related` carries only brief summaries, so its CSV fills
 PMID/Title/Authors/Journal/Year and leaves DOI, volume, MeSH and abstract
 empty — pass `--fetch` when the CSV is the deliverable. It refuses `cite`,
-`lookup-cite` and `related --pmids-only` output — none of those are article
-metadata — with a JSON `error` rather than a CSV of empty columns.
+`lookup-cite`, `fulltext` and `related --pmids-only` output — none of those are
+article metadata — with a JSON `error` rather than a CSV of empty columns.
+`fulltext` returns documents, not metadata: to export papers you also want the
+text of, run `fetch` for the CSV and `fulltext` separately.
 
 **Precise reference lookup then citation:**
 ```bash
@@ -107,9 +113,11 @@ python scripts/pubmed.py related 32109013 --type cited_by --limit 25 --offset 25
 ```
 `fulltext` returns `{"count": N, "articles": [...]}`. Each article carries
 `source` (`pmc` | `europepmc` | `unpaywall` | `none`) and `contentFormat`
-(`jats-text` | `pdf-text` | `html-markdown` | `url-only`). The two JATS stages also
-return `sections` (a list of `{title, text}`); the Unpaywall stage returns only
-flat `fullText`, so `--sections` and `--max-sections` do not apply to it.
+(`jats-text` | `pdf-text` | `html-markdown` | `plain-text` | `url-only`). The two
+JATS stages also return `sections` (a list of `{title, text}`); the Unpaywall
+stage returns only flat `fullText`, so `--sections` and `--max-sections` do not
+apply to it. Articles are keyed by `id`/`kind`, not `pmid` — this output is
+documents, not metadata, and `to_csv.py` rejects it for that reason.
 
 `related` returns brief summaries (title, authors, journal, date) in `articles`
 by default; `--fetch` upgrades them to full metadata and `--pmids-only` skips
@@ -139,6 +147,28 @@ ESearch untouched.
   about. Where recall matters, OR the MeSH clause with text terms:
   `("Obesity"[MeSH Terms] OR obesity[tiab] OR overweight[tiab])`. Say which of
   precision or recall the query was built for.
+- **`--species humans` is a MeSH filter, and it cancels that. Use
+  `--exclude-animals` instead.** `--species humans` emits `humans[MeSH Terms]` —
+  the same clause PubMed's own Species filter uses — so it drops every un-indexed
+  record whatever the article is about, undoing the text terms just OR'd in for
+  recall. `--exclude-animals` emits the hedge `NOT (animals[mh] NOT humans[mh])`,
+  which removes animal-only work without demanding a MeSH tag from the keepers.
+  On tirzepatide: 2,249 unfiltered → **1,216** with `--species humans` → **2,180**
+  with `--exclude-animals`, and the hedge drops exactly the 69 animal-only
+  studies. Reach for `--species humans` only when the Humans *tag* is genuinely
+  the requirement. `--mesh` carries the same indexing cost, and so does
+  `--pubtype` for the study-design types NLM assigns by hand: `"Randomized
+  Controlled Trial"[pt]` matches 122 tirzepatide papers, exactly 1 of them
+  un-indexed, so a design filter built from `--pubtype` alone searches the indexed
+  literature only — OR in text terms (`random*[tiab]`, `placebo*[tiab]`,
+  `"open-label"[tiab]`) when recall matters. Publisher-supplied types do not have
+  the problem: `"Review"[pt]` reaches 235 of the 971 un-indexed records.
+  `--language` has no such cost either.
+- **Never hand-write the hedge as `AND NOT`.** PubMed reads `A AND NOT B` as
+  `A AND B` — it drops the `NOT` silently and hands back precisely the set you
+  meant to exclude (`tirzepatide[tiab] AND NOT (animals[mh] NOT humans[mh])`
+  returns the 69 animal-only papers). The `NOT` must attach to the whole query,
+  which is what `--exclude-animals` builds for you. Check `queryTranslation`.
 - **`[majr]`** restricts to articles where the concept is a major topic — reach
   for it when a precision search returns too much noise. `--mesh` cannot emit it.
 - **Subheadings** narrow a descriptor to one aspect: `Hypertension/drug
@@ -184,7 +214,16 @@ ESearch untouched.
   scraping the printed text. On failure the JSON has an `error` key — check it
   before assuming a result shape.
 - `fulltext` reports which stage answered via `source`. A `source` of `none`
-  means no open-access copy exists, not that the article is missing. A
-  `source` of `unpaywall` with an empty `fullText` means the article is open
-  access but its host refused the download — read `hint` and hand the user
+  means no open-access copy was found, not that the article is missing — **unless
+  it also carries `error: id_not_found`**, which means PubMed has no such PMID and
+  the full-text question was never asked. Check that key before writing either
+  conclusion; the two cases are one word apart in the output and opposite in
+  meaning. A `source` of `unpaywall` with an empty `fullText` means the article is
+  open access but its host refused the download — read `hint` and hand the user
   `pdfUrl`/`landingUrl`.
+- `fetch` and `cite` name any PMID that came back with no record in `notFound`,
+  with a `notice`. EFetch drops unknown, withdrawn and merged PMIDs silently and
+  still returns HTTP 200, so `count` reports what arrived, never what was asked
+  for. Compare them before presenting a reference list as complete: a `notFound`
+  entry is a fact about the identifier, not evidence that the article is
+  retracted or nonexistent.

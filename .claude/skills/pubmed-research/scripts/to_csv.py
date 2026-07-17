@@ -3,14 +3,14 @@
 
 Column layout mirrors the PubMed2ExcelDownloader output. Reads JSON from a file
 or stdin. The JSON may be:
-  - the output of `pubmed.py fetch`, `search --summaries`, `related`, or
-    `fulltext` (an object with an "articles" list),
+  - the output of `pubmed.py fetch`, `search --summaries`, or `related`
+    (an object with an "articles" list),
   - the output of `pubmed.py epmc-search` (an object with a "results" list of
     Europe PMC hits), or
   - a bare list of article records.
 
-Output of `cite` and `lookup-cite` is not an article list; passing it produces a
-JSON error rather than a half-empty CSV.
+Output of `cite`, `lookup-cite` and `fulltext` is not article metadata; passing
+it produces a JSON error rather than a half-empty CSV.
 
 Usage:
     python pubmed.py fetch 31978945 12345678 | python to_csv.py -o out.csv
@@ -149,11 +149,26 @@ def _load_records(text: str) -> List[Dict[str, Any]]:
         if data.get("error"):
             raise ValueError(f"Input JSON reports an error: {data['error']}")
         if "articles" in data:
+            rows = data["articles"]
+            # `fulltext` fills `articles` too, but with documents rather than
+            # metadata: `id`/`kind` where a record has `pmid`, and no title,
+            # authors or journal at all. Passed through, record_to_row finds
+            # almost nothing to read and writes a row that is blank in 16 of 18
+            # columns — while the run still reports "Wrote N rows". That is the
+            # CSV of empty columns this function refuses everywhere else, so
+            # refuse it here too instead of trusting the caller to notice.
+            if rows and isinstance(rows[0], dict) and "kind" in rows[0] and "title" not in rows[0]:
+                raise ValueError(
+                    "This is `fulltext` output — full-text documents, not article "
+                    "metadata — so every metadata column would be empty. Build the CSV "
+                    "from `fetch`, `search --summaries`, `related --fetch`, or "
+                    "`epmc-search`, and keep `fulltext` for the text itself."
+                )
             # `related` without --fetch fills `articles` with brief summaries that
             # carry a string `authors`; everything else nests it. Normalize here
             # so record_to_row only ever sees the one shape.
             return [_brief_to_record(r) if isinstance(r.get("authors"), str) else r
-                    for r in data["articles"]]
+                    for r in rows]
         rows = data.get("results") or []
         # `results` is not unique to epmc-search: `cite` and `lookup-cite` use it
         # too, and neither carries article metadata. Match on a field only an

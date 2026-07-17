@@ -92,9 +92,64 @@ The `pubmed.py search` command builds these for you:
 - `--mesh Neoplasms Apoptosis` → each AND'd as `[MeSH Terms]`
 - `--pubtype Review "Meta-Analysis"` → OR'd as `[Publication Type]`
 - `--language english` → `english[Language]`
-- `--species humans` → `humans[MeSH Terms]`
+- `--species humans` → `humans[MeSH Terms]` — **a MeSH filter, see below**
+- `--species animals` → `(animals[mh] NOT humans[mh])` — PubMed's "Other Animals"
+- `--exclude-animals` → `NOT (animals[mh] NOT humans[mh])` — **the hedge, see below**
 - `--free-full-text` → `"free full text"[Filter]`
 - `--min-date 2020/01/01 --max-date 2024/12/31 --date-type pdat`
+
+## Species filtering: the hedge
+
+`--species humans` and `--mesh` AND a `[MeSH Terms]` clause, and only
+MEDLINE-indexed records carry MeSH. An article awaiting indexing cannot match
+either one whatever its subject, so both silently exclude the newest literature —
+and `--species humans` is the one that looks like a subject filter rather than a
+vocabulary one. It is what undoes a recall-first query: OR a text-word clause in
+for recall, then AND this on, and the recall is gone.
+
+This is PubMed's behaviour, not the skill's: `humans[Filter]` translates to the
+identical `"humans"[MeSH Terms]` and returns the identical count. The cost is
+yours either way.
+
+**The hedge** — `NOT (animals[mh] NOT humans[mh])`, what `--exclude-animals`
+builds — removes animal-only studies without requiring a tag from the keepers. An
+un-indexed record carries neither `animals[mh]` nor `humans[mh]`, so it does not
+match the excluded set and survives. Measured on tirzepatide (2026-07):
+
+| Query | Hits | of which un-indexed |
+|---|---|---|
+| `tirzepatide[tiab]` | 2,249 | 971 |
+| `... AND humans[MeSH Terms]` (`--species humans`) | **1,216** | 10 |
+| `... NOT (animals[mh] NOT humans[mh])` (`--exclude-animals`) | **2,180** | **970** |
+| `... AND (animals[mh] NOT humans[mh])` (`--species animals`) | 69 | — |
+
+The hedge drops exactly 69 records — precisely the animal-only set — and keeps
+970 of the 971 un-indexed. `--species animals` and `--exclude-animals` partition
+the corpus exactly: 69 + 2,180 = 2,249.
+
+Use `--species humans` only when the Humans *tag* is the actual requirement. Use
+`--exclude-animals` when the goal is "no animal studies", which is usually what is
+meant. `NOT medline[sb]` measures the indexing gap on your own topic.
+
+Two traps around this:
+
+- **`AND NOT` is silently inverted.** `A AND NOT B` runs as `A AND B`: PubMed
+  drops the `NOT`, without an error, and returns exactly the set you meant to
+  exclude. `tirzepatide[tiab] AND NOT (animals[mh] NOT humans[mh])` returns the
+  69 animal-only papers, not the 2,180. The `NOT` must attach to the whole query —
+  `(...) NOT (...)` — which is what `--exclude-animals` writes for you. Confirm in
+  `queryTranslation`: the hedge appears in full when it parsed.
+- **A bare `animals[mh]` is not "animal studies".** MeSH explodes over its
+  subtree and Humans sits under Animals, so `animals[mh]` matches every human
+  study too — 1,285 hits here, 1,216 of them human. Subtracting humans is exactly
+  why PubMed's sidebar names the filter "Other Animals". `animals[Filter]` is no
+  escape either: unlike `humans[Filter]` there is no such tag, so it survives
+  translation verbatim and returns zero.
+
+`english[Language]` has none of this (2,249 → 2,206): language is on the citation
+record from the start, not assigned at indexing. `--has-abstract` and
+`--free-full-text` cut hits too (1,913 and 1,360 here), but they mean what they
+say — that is the filter working, not indexing lag.
 
 Date types `--date-type` accepts: `pdat` (publication), `edat` (Entrez/added),
 `mdat` (last modification). `[mhda]` (MeSH date) is a valid tag in a raw query

@@ -21,6 +21,7 @@ import random
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote, quote_plus
 
 import requests
 
@@ -285,6 +286,15 @@ class _HTMLToMarkdown(HTMLParser):
 
     # Only elements with a real end tag may suppress: a void element like <meta>
     # never fires handle_endtag, so counting it would swallow the rest of the page.
+    #
+    # `header` and `aside` are blunt: HTML5 also allows <article><header> for the
+    # title and byline, and <aside> for figure captions, so those are dropped
+    # along with the site chrome this set is aimed at. Left as is on purpose —
+    # telling page chrome from article furniture needs tree context a streaming
+    # parser does not have, this path only runs when Unpaywall finds no PDF (it
+    # tries url_for_pdf first, and pdf-text or jats-text answers in practice), and
+    # the caller already has the title from `fetch`. Guessing wrong here would
+    # splice nav menus into article text, which is worse than a missing heading.
     _SKIP = {"script", "style", "noscript", "head", "svg",
              "nav", "footer", "header", "form", "button", "aside"}
     _VOID = {"meta", "link", "br", "hr", "img", "input", "source", "col", "area", "embed"}
@@ -453,9 +463,41 @@ def fetch_document(url: str, timeout: int = 90) -> Tuple[str, str]:
     return "", ""
 
 
+# ─── Secret redaction ────────────────────────────────────────────────────────
+# `requests` builds its exception text and `response.url` from the full request
+# URL, api_key and all. Every error path here prints one of those, so a 400 from
+# a typo'd PMID is enough to publish the key — into stdout JSON, into an LLM's
+# context, and from there into whatever report or log it writes. Scrub anything
+# before it is surfaced.
+_SECRET_QS = re.compile(r"((?:api_key|email|mailto)=)[^&\s\"']+", re.I)
+
+
+def redact(text: Any) -> str:
+    """Remove credentials from text that is about to be printed."""
+    if not text:
+        return "" if text is None else str(text)
+    out = str(text)
+    # Known values first: these catch a leak anywhere in the string, including
+    # forms the query-string pattern below would miss (a bare key in a message).
+    cfg = load_config()
+    for key in ("NCBI_API_KEY", "NCBI_EMAIL", "UNPAYWALL_EMAIL"):
+        val = cfg.get(key)
+        if not val:
+            continue
+        for variant in {val, quote_plus(val), quote(val, safe="")}:
+            out = out.replace(variant, f"<{key}>")
+    # Then by parameter name, so a key reaching us from somewhere other than
+    # load_config() (a caller's own env, a redirect) is still covered.
+    return _SECRET_QS.sub(r"\1<redacted>", out)
+
+
 def eprint(*args: Any, **kwargs: Any) -> None:
-    """Print to stderr (progress/diagnostics that shouldn't pollute stdout JSON)."""
-    print(*args, file=sys.stderr, **kwargs)
+    """Print to stderr (progress/diagnostics that shouldn't pollute stdout JSON).
+
+    Redacted like stdout: stderr is shown to the caller too, so a leak here is a
+    leak.
+    """
+    print(*(redact(a) for a in args), file=sys.stderr, **kwargs)
 
 
 def chunked(seq: List[Any], size: int) -> Iterable[List[Any]]:

@@ -42,6 +42,7 @@ from eutils_common import (
     normalize_ws,
     fetch_document,
     have_pdf_support,
+    redact,
     EUROPEPMC_BASE,
     UNPAYWALL_BASE,
     PMC_IDCONV_URL,
@@ -77,8 +78,17 @@ def _build_query(args) -> str:
         parts.append(f"({clause})" if len(pubtypes) > 1 else clause)
     if args.language:
         parts.append(f"{args.language}[Language]")
-    if args.species:
-        parts.append(f"{args.species}[MeSH Terms]")
+    if args.species == "humans":
+        parts.append("humans[MeSH Terms]")
+    elif args.species == "animals":
+        # Not animals[MeSH Terms]: MeSH terms explode over their subtree and
+        # Humans sits inside Animals, so that clause matches every human study
+        # too — 1,216 of the 1,285 it returned for tirzepatide, i.e. 95% of a
+        # filter asking for animal work. Subtracting humans is what PubMed's own
+        # sidebar does, which is why it calls the filter 'Other Animals'.
+        # (animals[Filter] is not a way out — unlike humans[Filter] no such tag
+        # exists, so it survives translation verbatim and matches nothing.)
+        parts.append("(animals[mh] NOT humans[mh])")
     if args.free_full_text:
         parts.append('"free full text"[Filter]')
     if args.has_abstract:
@@ -92,7 +102,17 @@ def _build_query(args) -> str:
         lo = args.min_date or "1000"
         hi = args.max_date or "3000"
         parts.append(f"({lo}:{hi}[{field}])")
-    return " AND ".join(parts) if parts else (args.query or "")
+    term = " AND ".join(parts) if parts else (args.query or "")
+
+    # The animal-exclusion hedge. It has to be NOT'd onto the finished query
+    # rather than joined in as another AND clause, because PubMed reads
+    # `A AND NOT B` as `A AND B` — it drops the NOT, without an error, and hands
+    # back exactly the set that was meant to be excluded. Wrapping the chain and
+    # appending a bare NOT is the only form that survives translation; confirm it
+    # in queryTranslation, which shows the hedge in full when it parsed.
+    if getattr(args, "exclude_animals", False) and term.strip():
+        term = f"({term}) NOT (animals[mh] NOT humans[mh])"
+    return term
 
 
 def cmd_search(args) -> None:
@@ -164,12 +184,14 @@ def cmd_search(args) -> None:
     if not_found:
         result["phrasesNotFound"] = not_found
 
+    notices: List[str] = []
+
     # ESearch serves at most ~9,999 records per query and truncates in silence:
     # ask for 20,000 and 9,999 come back looking like the whole answer. --offset
     # is no way out either — retstart itself refuses past 9998 — so the only
     # honest advice is to slice the query up.
     if len(pmids) < min(args.limit, total):
-        result["notice"] = (
+        notices.append(
             f"Asked for {args.limit}; ESearch returned {len(pmids)} of {total:,} "
             "matches. One query cannot reach past ~9,999 records, and --offset "
             "cannot either (retstart refuses past 9998). To cover the rest, split "
@@ -177,6 +199,61 @@ def cmd_search(args) -> None:
             "windows work well — and combine them. Do not present this page as the "
             "complete result set."
         )
+
+    # --species is a MeSH filter wearing a plain-English name, and it is the one
+    # flag that quietly undoes a recall-first query: an OR'd text-word clause
+    # widens the search, then this ANDs a clause only MEDLINE-indexed records can
+    # satisfy. Un-indexed articles — the newest ones — are dropped whatever their
+    # subject, so the count means 'indexed <species> studies', not '<species>
+    # studies'. This is PubMed's own filter, not a quirk of this skill —
+    # humans[Filter] translates to the identical humans[MeSH Terms] — but the cost
+    # is the caller's either way. Measured on tirzepatide: 2,258 -> 1,225, and 961
+    # of the 1,033 lost were un-indexed rather than non-human.
+    if args.species == "humans" and not args.exclude_animals:
+        notices.append(
+            "--species humans was AND'd as humans[MeSH Terms] — the same clause "
+            "PubMed's own Species filter uses. Only MEDLINE-indexed records carry "
+            "MeSH, so articles awaiting indexing (disproportionately the newest) "
+            "cannot match it whatever they are about: this count is 'indexed human "
+            "studies', not 'human studies', and it cancels the recall of any "
+            "text-word clause OR'd into the query. On a recent topic the cut is "
+            "routinely 40%+. If the goal is to drop animal work rather than to "
+            "require the Humans tag, use --exclude-animals instead: it removes "
+            "animal-only studies and keeps un-indexed records. Measured on "
+            "tirzepatide: 2,249 -> 1,216 with this flag, 2,180 with --exclude-animals."
+        )
+    elif args.species == "animals":
+        notices.append(
+            "--species animals was AND'd as (animals[mh] NOT humans[mh]) — PubMed's "
+            "'Other Animals', not a bare animals[mh], which would explode over the "
+            "MeSH tree and match every human study as well. Only MEDLINE-indexed "
+            "records carry MeSH, so un-indexed articles are excluded whatever they "
+            "studied. Unlike the humans case there is no hedge for this — naming an "
+            "animal study requires the index — so this count is 'indexed animal "
+            "studies', and report it as such."
+        )
+
+    if args.exclude_animals and args.species == "humans":
+        notices.append(
+            "--exclude-animals was combined with --species humans and did nothing: "
+            "every record --species humans keeps carries humans[mh], and the hedge "
+            "only removes records that lack it. The un-indexed articles the hedge "
+            "exists to preserve were already gone before it ran. Drop --species "
+            "humans if you wanted the hedge's recall."
+        )
+    elif args.exclude_animals and args.species == "animals":
+        # AND (X) ... NOT (X) — the same clause required and forbidden. Zero is
+        # arithmetic here, not evidence, and a zero from a contradiction reads
+        # exactly like a zero from an empty literature.
+        notices.append(
+            "--exclude-animals contradicts --species animals: one requires "
+            "(animals[mh] NOT humans[mh]) and the other excludes that same clause, "
+            "so this query matches nothing by construction. A zero here says nothing "
+            "about the literature — do not report it as a finding. Pick one flag."
+        )
+
+    if notices:
+        result["notice"] = " ".join(notices)
 
     if total == 0 and not_found:
         result["guidance"] = (
@@ -237,6 +314,35 @@ def _fetch_records(
     return records
 
 
+def _missing_pmids(requested: List[str], records: List[Dict[str, Any]]) -> List[str]:
+    """PMIDs that were asked for but did not come back.
+
+    EFetch answers an unknown, withdrawn or merged PMID with HTTP 200 and simply
+    omits the record — no error, no placeholder, nothing that distinguishes it
+    from an ID that was never asked for. Ask for 50 and `count: 47` is the only
+    trace that three vanished, and nothing says which. Diff the two lists.
+    """
+    got = {str(r.get("pmid", "")) for r in records}
+    return [p for p in dict.fromkeys(requested) if p not in got]
+
+
+def _note_missing(result: Dict[str, Any], requested: List[str],
+                  records: List[Dict[str, Any]], *, verb: str) -> None:
+    missing = _missing_pmids(requested, records)
+    if not missing:
+        return
+    result["notFound"] = missing
+    result["notice"] = (
+        f"{len(requested)} PMIDs were requested but only {len(records)} came back. "
+        f"PubMed returned no record for: " + ", ".join(missing) + ". EFetch omits "
+        "unknown, withdrawn and merged PMIDs silently, so this is a fact about the "
+        f"IDs, not about the articles — do not {verb} the rest as if the list were "
+        "complete, and do not report the missing ones as retracted or nonexistent "
+        "without checking. Verify each with `search <pmid>[uid]`; a merged record "
+        "answers under its surviving PMID."
+    )
+
+
 def cmd_fetch(args) -> None:
     pmids = _clean_ids(args.pmids)
     if not pmids:
@@ -245,7 +351,9 @@ def cmd_fetch(args) -> None:
     records = _fetch_records(
         pmids, include_grants=args.include_grants, include_mesh=not args.no_mesh
     )
-    _out({"count": len(records), "articles": records})
+    result: Dict[str, Any] = {"count": len(records), "articles": records}
+    _note_missing(result, pmids, records, verb="present")
+    _out(result)
 
 
 # ─── convert-ids (PMC ID Converter) ──────────────────────────────────────────
@@ -444,7 +552,7 @@ def cmd_related(args) -> None:
             "sourcePmid": pmid, "type": rel, "source": "none", "totalCount": 0,
             "offset": args.offset, "count": 0, "pmids": [],
             "notice": f"All providers failed (NCBI, Europe PMC, OpenAlex). "
-                      f"Last error: {provider_error}. Retry after a brief delay.",
+                      f"Last error: {redact(provider_error)}. Retry after a brief delay.",
         })
         return
 
@@ -804,11 +912,18 @@ def _unpaywall_fulltext(doi: str) -> Dict[str, Any]:
 def _fulltext_one(identifier: str, kind: str, args) -> Dict[str, Any]:
     pmcid = ""
     doi = ""
+    known = None  # True = PubMed has the record, False = it does not, None = unchecked
     if kind == "pmcid":
         pmcid = _normalize_pmcid(identifier)
     elif kind == "pmid":
         pmcid = _resolve_to_pmcid(identifier)
         recs = _fetch_records([identifier])
+        # EFetch returning no record for a well-formed PMID is PubMed saying it
+        # has no such article, and that is the one fact separating 'the ID is
+        # wrong' from 'the paper is paywalled'. Both end this function with
+        # nothing to show, so without capturing it here the two become the same
+        # answer. It costs no extra request — the DOI lookup already made it.
+        known = bool(recs)
         doi = recs[0]["doi"] if recs else ""
     elif kind == "doi":
         doi = identifier
@@ -822,13 +937,31 @@ def _fulltext_one(identifier: str, kind: str, args) -> Dict[str, Any]:
     if not res and doi:
         res = _unpaywall_fulltext(doi)
 
+    if not res and known is False:
+        # Never reached the OA question, so do not answer it.
+        return {
+            "id": identifier,
+            "kind": kind,
+            "source": "none",
+            "error": "id_not_found",
+            "pmcid": pmcid,
+            "doi": doi,
+            "message": f"PubMed has no record with PMID {identifier}, so no full-text "
+                       "lookup was attempted. This says nothing about open access: a "
+                       "real but paywalled article also ends at 'source: none', with a "
+                       "message saying no OA copy was found. Do not report this ID as "
+                       "having no full text. Check it with `search "
+                       f"{identifier}[uid]` — a merged record answers under the PMID "
+                       "that survived.",
+        }
+
     if not res:
         hint = ""
         if not doi:
             hint = "No DOI resolved for this ID, so the Unpaywall stage was skipped."
         elif not load_config().get("UNPAYWALL_EMAIL"):
             hint = "Set UNPAYWALL_EMAIL in .env to enable the Unpaywall fallback."
-        return {
+        out: Dict[str, Any] = {
             "id": identifier,
             "kind": kind,
             "source": "none",
@@ -837,6 +970,21 @@ def _fulltext_one(identifier: str, kind: str, args) -> Dict[str, Any]:
             "message": "No open-access full text found via PMC, Europe PMC, or Unpaywall.",
             "hint": hint,
         }
+        # known is None only for --kind doi/pmcid: nothing on those paths looks the
+        # identifier up, so a typo arrives here wearing the same answer as a real
+        # paywalled paper — the confusion --kind pmid used to have. Verifying would
+        # cost a Crossref call on every paywalled DOI, which is the common case, so
+        # say what is not known instead of paying for it. `idVerified` lets a caller
+        # tell the two apart without reading prose.
+        if known is None:
+            out["idVerified"] = False
+            out["message"] += (
+                f" Note this is not evidence that the {kind} exists: no step here "
+                f"validates it, so a mistyped {kind} produces exactly this answer. "
+                "Check that it resolves (https://doi.org/<doi> for a DOI) before "
+                "reporting the article as having no open-access copy."
+            )
+        return out
 
     res["id"] = identifier
     res["kind"] = kind
@@ -874,6 +1022,9 @@ def cmd_fulltext(args) -> None:
 # ─── cite (format citations) ─────────────────────────────────────────────────
 def cmd_cite(args) -> None:
     pmids = _clean_ids(args.pmids)
+    if not pmids:
+        _out({"error": "No PMIDs provided."})
+        return
     records = _fetch_records(pmids)
     styles = args.style or ["vancouver"]
     out: List[Dict[str, Any]] = []
@@ -882,7 +1033,11 @@ def cmd_cite(args) -> None:
         for style in styles:
             entry["citations"][style] = cite_mod.format_citation(rec, style)
         out.append(entry)
-    _out({"count": len(out), "styles": styles, "results": out})
+    result: Dict[str, Any] = {"count": len(out), "styles": styles, "results": out}
+    # A dropped ID here is a reference that silently never reaches the
+    # bibliography — the caller pasted N PMIDs and gets N-1 formatted entries.
+    _note_missing(result, pmids, records, verb="paste")
+    _out(result)
 
 
 # ─── lookup-cite (ECitMatch) ─────────────────────────────────────────────────
@@ -1060,6 +1215,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--author"); s.add_argument("--journal")
     s.add_argument("--mesh", nargs="*"); s.add_argument("--pubtype", nargs="*")
     s.add_argument("--language"); s.add_argument("--species", choices=["humans", "animals"])
+    s.add_argument("--exclude-animals", action="store_true", dest="exclude_animals",
+                   help="Drop animal-only studies without requiring MeSH on every keeper: "
+                        "NOT (animals[mh] NOT humans[mh]). Use instead of --species humans "
+                        "when recall matters.")
     s.add_argument("--free-full-text", action="store_true", dest="free_full_text")
     s.add_argument("--has-abstract", action="store_true", dest="has_abstract",
                    help="Only articles that have an abstract.")
@@ -1143,21 +1302,24 @@ def main(argv: List[str]) -> int:
         args.func(args)
     except KeyboardInterrupt:
         raise
+    # `requests` puts the full request URL — api_key included — into both
+    # response.url and the exception text, so every field below has to be
+    # redacted before printing.
     except requests.HTTPError as exc:
         resp = getattr(exc, "response", None)
         _out({
             "error": "http_error",
             "command": args.cmd,
             "status": getattr(resp, "status_code", None),
-            "url": getattr(resp, "url", ""),
-            "message": str(exc),
+            "url": redact(getattr(resp, "url", "")),
+            "message": redact(exc),
         })
         return 1
     except requests.RequestException as exc:
-        _out({"error": "network_error", "command": args.cmd, "message": str(exc)})
+        _out({"error": "network_error", "command": args.cmd, "message": redact(exc)})
         return 1
     except Exception as exc:  # noqa: BLE001
-        _out({"error": type(exc).__name__, "command": args.cmd, "message": str(exc)})
+        _out({"error": type(exc).__name__, "command": args.cmd, "message": redact(exc)})
         return 1
     return 0
 

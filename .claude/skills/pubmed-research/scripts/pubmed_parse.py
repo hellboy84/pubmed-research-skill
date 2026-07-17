@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from eutils_common import parse_xml
+from eutils_common import parse_xml, eprint
 
 
 def _text(el) -> str:
@@ -53,6 +53,10 @@ def _author_from_el(auth) -> Optional[Dict[str, Any]]:
     fore = _text(_first(auth, "ForeName"))
     collective = _text(_first(auth, "CollectiveName"))
     initials = _text(_first(auth, "Initials"))
+    # 'Glass DA 2nd' and 'Glass DA' are different people, and NLM keeps the
+    # generational suffix in its own element. Dropping it silently merges them,
+    # and ICMJE puts it in the citation.
+    suffix = _text(_first(auth, "Suffix"))
     affs = []
     for aff in _findall(auth, ".//AffiliationInfo/Affiliation"):
         a = _text(aff)
@@ -61,15 +65,16 @@ def _author_from_el(auth) -> Optional[Dict[str, Any]]:
     if collective:
         name = collective
     elif last:
-        name = f"{last} {initials}".strip() if initials else last
+        name = " ".join(p for p in (last, initials, suffix) if p)
     else:
-        name = fore
+        name = " ".join(p for p in (fore, suffix) if p)
     if not name:
         return None
     return {
         "lastName": last,
         "firstName": fore,
         "initials": initials,
+        "suffix": suffix,
         "name": name,
         "affiliations": affs,
     }
@@ -320,14 +325,36 @@ def parse_book_article(pubmed_book_article) -> Dict[str, Any]:
     }
 
 
+def _pmid_of(el, path: str) -> str:
+    """Best-effort PMID for a record that failed to parse, for the log line."""
+    try:
+        found = el.find(path)
+        return (found.text or "").strip() if found is not None else "?"
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 def parse_efetch_xml(xml_text: str) -> List[Dict[str, Any]]:
-    """Parse a full PubmedArticleSet EFetch response into a list of records."""
+    """Parse a full PubmedArticleSet EFetch response into a list of records.
+
+    A record that cannot be parsed is skipped rather than failing the batch — one
+    malformed entry should not cost the caller the other 199. But it is never
+    skipped silently: downstream, a record missing from this list is
+    indistinguishable from one PubMed never sent, and cmd_fetch would then name
+    it in `notFound` as an ID PubMed has no record for. That would be a true
+    statement about the list and a false one about the article, blaming NCBI for
+    a parser bug here. Neither branch fired on 281 real records; say so on stderr
+    if either ever does.
+    """
     root = parse_xml(xml_text)
     records: List[Dict[str, Any]] = []
     for art in root.iter("PubmedArticle"):
         try:
             records.append(parse_article(art))
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            eprint(f"[pubmed_parse] PMID {_pmid_of(art, './/MedlineCitation/PMID')}: "
+                   f"unparseable PubmedArticle, skipped ({type(exc).__name__}: {exc}). "
+                   f"It will look like PubMed returned no record for it.")
             continue
     # Book articles nest their content differently and need a dedicated parser.
     for art in root.iter("PubmedBookArticle"):
@@ -335,7 +362,10 @@ def parse_efetch_xml(xml_text: str) -> List[Dict[str, Any]]:
             rec = parse_book_article(art)
             if rec:
                 records.append(rec)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            eprint(f"[pubmed_parse] PMID {_pmid_of(art, './/BookDocument/PMID')}: "
+                   f"unparseable PubmedBookArticle, skipped ({type(exc).__name__}: {exc}). "
+                   f"It will look like PubMed returned no record for it.")
             continue
     return records
 
