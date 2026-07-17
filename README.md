@@ -11,7 +11,7 @@ PubMed の文献検索・取得・CSV 出力を AI にまかせるための
 
 - プロンプト：「セマグルチドの肥満への適用に関するRCT論文等の質の高い論文を2020年以降で20件探して、引用文献付きのレポートにして/ 使用した検索式もレポートに含めて / 使用した文献リストをCSV でも用意して」
 
-![このプロンプトに基づいてSkillsが発動してレポートと文献リストをつくっている光景](SAMPLE/20260717_semaglutide_search_sample.png)
+![このプロンプトに基づいてSkillsが発動してレポートと文献リストをつくっている光景](SAMPLE/20260717_semaglutide_search_sample.png) ↑ このプロンプトに基づいてSkillsが発動してレポートと文献リストをつくっている光景
 
 - 生成されたレポート：[semaglutide_obesity_report.md](SAMPLE/semaglutide_obesity_report.md) 引用文献付き。使用した検索式とヒット件数も収録
 - 生成された文献リスト：[semaglutide_obesity_20refs.csv](SAMPLE/semaglutide_obesity_20refs.csv) 20件×18列（GitHub上では表として表示されます）
