@@ -1,7 +1,7 @@
 # pubmed-research-skill
 
 PubMed の文献検索・取得・CSV 出力を AI にまかせるための
-[Claude Agent Skill](https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview) です。
+[Agent Skill](https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview) です。
 
 - 例えば、「〇〇に関するRCT論文を2020年以降で50件探して、引用文献付きのレポートにして/ 使用した検索式もレポートに含めて / 使用した文献リストをCSV でも用意して」と頼めば、AI が PubMed を検索し、抄録や全文が取得できるものはその全文も取得したうえで、レポートと文献リストを作成してくれます。
 - PubMedの検索には、語の掛け合わせやMeSHの使用、期間の指定、文献種類の指定、検索フィールドの限定、などの人力で検索式を作成する際の一般的なテクニックが使用されます。
