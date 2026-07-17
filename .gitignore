@@ -14,9 +14,11 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# Output
+# Output — generated CSVs are the user's, not part of the skill.
+# SAMPLE/ is the exception: those are committed as documentation.
 *.csv
 !**/references/*.csv
+!SAMPLE/*.csv
 
 # OS / editor
 .DS_Store

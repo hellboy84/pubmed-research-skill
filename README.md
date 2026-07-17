@@ -7,6 +7,16 @@ PubMed の文献検索・取得・CSV 出力を AI にまかせるための
 - PubMedの検索には、語の掛け合わせやMeSHの使用、期間の指定、文献種類の指定、検索フィールドの限定、などの人力で検索式を作成する際の一般的なテクニックが使用されます。
 - 検索式の妥当性は使用するAIの賢さに依存します。
 
+## 動作SAMPLE
+
+- プロンプト：「セマグルチドの肥満への適用に関するRCT論文等の質の高い論文を2020年以降で20件探して、引用文献付きのレポートにして/ 使用した検索式もレポートに含めて / 使用した文献リストをCSV でも用意して」
+
+![実行画面：生成されたレポートと文献リストCSVを VS Code で開いたところ](SAMPLE/20260717_semaglutide_search_sample.png)
+
+- 生成されたレポート(md)：[semaglutide_obesity_report.md](SAMPLE/semaglutide_obesity_report.md) — 引用文献付き。使用した検索式とヒット件数も収録
+- 生成された文献リスト(csv)：[semaglutide_obesity_20refs.csv](SAMPLE/semaglutide_obesity_20refs.csv) — 20件×18列（GitHub上では表として表示されます）
+
+
 ## 本Skillに含まれる11個のツール
 
 AI が内容に応じて自動で使い分けます。
