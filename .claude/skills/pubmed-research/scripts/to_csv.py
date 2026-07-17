@@ -93,6 +93,28 @@ def _epmc_to_record(hit: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _brief_to_record(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """Reshape a `related` brief summary into the article-record shape.
+
+    ESummary flattens what EFetch nests, the same way an EPMC hit does: `authors`
+    arrives as one comma-joined string and the journal as `source`. Passed
+    through untouched, record_to_row calls .get() on a string and dies. The
+    columns the summary cannot fill (DOI, volume, MeSH, abstract) stay empty —
+    `related --fetch` is what populates those.
+    """
+    pmid = str(rec.get("pmid") or "")
+    names = [n.strip() for n in (rec.get("authors") or "").rstrip(".").split(",")]
+    names = [n for n in names if n and n.lower() not in ("et al", "et al.")]
+    return {
+        "pmid": pmid,
+        "title": rec.get("title", ""),
+        "authors": [{"name": n} for n in names],
+        "journal": {"title": rec.get("source", ""),
+                    "year": str(rec.get("pubDate") or "")[:4]},
+        "pubmedUrl": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "",
+    }
+
+
 def record_to_row(rec: Dict[str, Any]) -> Dict[str, str]:
     j = rec.get("journal") or {}
     authors = rec.get("authors", []) or []
@@ -127,7 +149,11 @@ def _load_records(text: str) -> List[Dict[str, Any]]:
         if data.get("error"):
             raise ValueError(f"Input JSON reports an error: {data['error']}")
         if "articles" in data:
-            return data["articles"]
+            # `related` without --fetch fills `articles` with brief summaries that
+            # carry a string `authors`; everything else nests it. Normalize here
+            # so record_to_row only ever sees the one shape.
+            return [_brief_to_record(r) if isinstance(r.get("authors"), str) else r
+                    for r in data["articles"]]
         rows = data.get("results") or []
         # `results` is not unique to epmc-search: `cite` and `lookup-cite` use it
         # too, and neither carries article metadata. Match on a field only an
@@ -150,21 +176,22 @@ def main(argv: List[str]) -> int:
 
     # Callers parse stdout as JSON, so bad input has to surface the same way the
     # pubmed.py subcommands surface it: an object with an `error` key, not a
-    # traceback.
+    # traceback. Shaping each row belongs inside this too — a record the columns
+    # do not fit is bad input like any other, and it used to escape as a
+    # traceback because the write loop sat outside the guard.
     try:
         text = open(args.input, encoding="utf-8").read() if args.input else sys.stdin.read()
         records = _load_records(text)
+        with open(args.output, "w", encoding="utf-8-sig", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=COLUMNS, quoting=csv.QUOTE_ALL)
+            writer.writeheader()
+            for rec in records:
+                writer.writerow(record_to_row(rec))
     except Exception as exc:  # noqa: BLE001
         json.dump({"error": type(exc).__name__, "message": str(exc)},
                   sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
         return 1
-
-    with open(args.output, "w", encoding="utf-8-sig", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=COLUMNS, quoting=csv.QUOTE_ALL)
-        writer.writeheader()
-        for rec in records:
-            writer.writerow(record_to_row(rec))
 
     print(f"Wrote {len(records)} rows to {args.output}", file=sys.stderr)
     return 0

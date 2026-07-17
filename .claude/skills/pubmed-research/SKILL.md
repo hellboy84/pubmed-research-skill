@@ -45,9 +45,9 @@ the skill. From there every command takes the form
 
 | Subcommand | What it does | Backing API |
 |------------|--------------|-------------|
-| `search` | Search PubMed; returns PMIDs (+ optional full metadata via `--summaries`). Supports author/journal/MeSH/pubtype/language/species/date filters, `--has-abstract`, and `--offset` paging. Multiple `--mesh` terms are AND'd; multiple `--pubtype` values are OR'd. `--min-date`/`--max-date` may be given alone for an open-ended range. Output carries `queryTranslation` — read it, see "Building a search strategy". | ESearch |
+| `search` | Search PubMed; returns PMIDs (+ optional full metadata via `--summaries`). Supports author/journal/MeSH/pubtype/language/species/date filters, `--has-abstract`, `--free-full-text`, and `--offset` paging. Multiple `--mesh` terms are AND'd; multiple `--pubtype` values are OR'd. `--min-date`/`--max-date` may be given alone for an open-ended range. Output carries `queryTranslation` — read it, see "Building a search strategy". | ESearch |
 | `fetch` | Full metadata for one or more PMIDs: title, structured abstract, authors with deduplicated affiliations, journal, IDs, MeSH, publication types. `--include-grants` adds funding records. Batches up to 200 (auto-POST at ≥100). | EFetch |
-| `fulltext` | Open-access full text for up to 10 PMIDs/PMCIDs/DOIs via a 3-stage chain: **PMC EFetch → Europe PMC fullTextXML → Unpaywall**. Returns structured `sections` for the JATS stages; `--sections`, `--max-sections`, `--include-references` filter them. | PMC / EPMC / Unpaywall |
+| `fulltext` | Open-access full text for up to 10 PMIDs/PMCIDs/DOIs via a 3-stage chain: **PMC EFetch → Europe PMC fullTextXML → Unpaywall**. Returns structured `sections` for the JATS stages; `--sections`, `--max-sections`, `--include-references` filter them. IDs past the 10th are dropped and named in `notice` — re-run for them. | PMC / EPMC / Unpaywall |
 | `epmc-search` | Search Europe PMC for preprints (`PPR`), patents (`PAT`), Agricola (`AGR`), and EPMC-only OA records that don't surface in PubMed. Cursor paging via `--cursor`; `--sort`, `--result-type`. | Europe PMC |
 | `convert-ids` | Convert between DOI / PMID / PMCID (50 IDs per request; only articles indexed in PMC). Mixed-type batches are grouped automatically. | PMC ID Converter |
 | `related` | Find `similar`, `cited_by`, or `references` articles for a source PMID, with `--offset` paging. Returns brief summaries by default (`--fetch` for full metadata, `--pmids-only` for IDs). Provider chain: ELink, then Europe PMC (`cited_by`/`references` only), then OpenAlex. First success wins; results are never merged. | ELink → Europe PMC → OpenAlex |
@@ -76,7 +76,10 @@ as text avoids that. For a hard guarantee against auto-conversion, build an
 `.xlsx` with string-typed cells via the xlsx skill instead.
 
 `to_csv.py` also accepts the output of `fetch`, `related`, `fulltext`, and
-`epmc-search`. It refuses `cite` and `lookup-cite` output — that is not article
+`epmc-search`. Bare `related` carries only brief summaries, so its CSV fills
+PMID/Title/Authors/Journal/Year and leaves DOI, volume, MeSH and abstract
+empty — pass `--fetch` when the CSV is the deliverable. It refuses `cite`,
+`lookup-cite` and `related --pmids-only` output — none of those are article
 metadata — with a JSON `error` rather than a CSV of empty columns.
 
 **Precise reference lookup then citation:**
@@ -92,8 +95,8 @@ python scripts/pubmed.py cite 31978945 --style vancouver apa
 python scripts/pubmed.py mesh "diabetes"          # → Diabetes Mellitus (D003920) first
 python scripts/pubmed.py search --mesh "Diabetes Mellitus, Type 2" --limit 30 --summaries
 ```
-`mesh` matches descriptors, not free text: a lay phrase like `"sugar diabetes"`
-returns zero records plus a `guidance` field. Reduce the term to one concept, or
+`mesh` matches the controlled vocabulary, not free text: a lay phrase like
+`"sugar diabetes"` returns zero records plus a `guidance` field. Reduce the term to one concept, or
 run `spell` on it, before concluding no descriptor exists.
 
 **Full text and related work:**
@@ -125,10 +128,11 @@ neighbors.
 ## Building a search strategy
 
 The `search` flags emit `[MeSH Terms]`, `[Publication Type]`, `[Author]`,
-`[Journal]`, `[Language]` and a date range — nothing else. That is a precision
-search over well-indexed topics, and it is the whole flag surface, so building a
-query from flags alone quietly settles for it. Everything below needs raw syntax
-in the query string, which passes through to ESearch untouched.
+`[Journal]`, `[Language]`, `[Filter]`, `hasabstract` and a date range — no other
+syntax. That is a precision search over well-indexed topics, and it is the whole
+flag surface, so building a query from flags alone quietly settles for it.
+Everything below needs raw syntax in the query string, which passes through to
+ESearch untouched.
 
 - **MeSH alone under-recalls.** Indexing lags publication by weeks to months, so
   a MeSH-only query drops the newest articles — often the ones being asked
@@ -139,9 +143,11 @@ in the query string, which passes through to ESearch untouched.
   for it when a precision search returns too much noise. `--mesh` cannot emit it.
 - **Subheadings** narrow a descriptor to one aspect: `Hypertension/drug
   therapy[mh]`. Run `mesh` on the descriptor first and read
-  `allowableQualifiers`; an illegal pairing returns zero hits, not an error.
-  `drug therapy[sh]` is a different search — the qualifier need not attach to
-  the descriptor you meant.
+  `allowableQualifiers` — a bad qualifier never errors. An illegal pairing
+  returns zero; a qualifier that does not exist at all is rewritten into an
+  unrelated free-text search that returns plausible hits. Both are worked
+  through in `references/query_syntax.md`. `drug therapy[sh]` is a different
+  search again — the qualifier need not attach to the descriptor you meant.
 - **Report `queryTranslation`, never the `query` you sent.** PubMed rewrites
   silently and without error: a wildcard inside a proximity phrase drops the
   `:~N`, `[tw:~3]` drops it too, and `[mh:~3]` is left verbatim to match
@@ -152,9 +158,23 @@ in the query string, which passes through to ESearch untouched.
 
 ## Guidance for good results
 
-- When a search returns zero hits, don't stop — run `spell` on the query, then
-  relax filters (dates, publication types) or broaden terms before reporting
-  nothing found. The `search` output includes a `guidance` field in this case.
+- Read `phrasesNotFound` on **every** search, not only on zeros. It names the
+  phrases PubMed matched nothing for. Under `AND` that produces zero hits and is
+  hard to miss; under `OR` the search still returns plenty while one clause
+  contributed nothing at all — a healthy-looking count for a search that is not
+  the one being reported.
+- When it is populated, the term does not exist in the index as written: fix it
+  with `mesh` and re-run. Do not relax filters, and never report the literature
+  as empty — the zero says nothing about the topic. `spell` is the wrong tool
+  here; it checks spelling, not MeSH validity, and answers a well-spelled
+  non-descriptor with a confident non-descriptor.
+- Only when `phrasesNotFound` is absent does a zero mean the query itself found
+  nothing. Then run `spell`, relax filters (dates, publication types) or broaden
+  terms before reporting nothing found. The `search` output carries a `guidance`
+  field naming which case you are in.
+- `phrasesNotFound` does not cover a bad MeSH qualifier — that fails silently in
+  its own two ways, both described in `references/query_syntax.md`. Checking
+  `allowableQualifiers` from `mesh` first is the only defence.
 - Prefer `mesh` to pin down controlled vocabulary before a precision search, and
   `lookup-cite` over free-text search when the user already has a structured
   reference.

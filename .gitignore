@@ -20,6 +20,9 @@ venv/
 !**/references/*.csv
 !SAMPLE/*.csv
 
+# Working notes — carried between machines by OneDrive, not part of the skill
+HANDOFF.md
+
 # OS / editor
 .DS_Store
 Thumbs.db

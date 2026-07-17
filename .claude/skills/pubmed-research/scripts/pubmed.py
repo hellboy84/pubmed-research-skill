@@ -120,9 +120,32 @@ def cmd_search(args) -> None:
         params["sort"] = sort_map[args.sort]
 
     resp = eutils_request("esearch.fcgi", params)
-    data = resp.json().get("esearchresult", {})
+    # ESearch refuses a request with HTTP 200 and an ERROR string in the body,
+    # and it embeds raw newlines in that string. Strict parsing rejects the body,
+    # and because requests raises its JSONDecodeError as a RequestException, the
+    # top-level handler then labels a paging-limit refusal 'network_error' — the
+    # one diagnosis that invites a pointless retry. Parse leniently, then hand
+    # back what NCBI actually said.
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 - requests wraps JSON errors as RequestException
+        payload = json.loads(resp.text, strict=False)
+    data = payload.get("esearchresult", {})
+    if data.get("ERROR"):
+        _out({"error": "esearch_error", "command": "search", "query": term,
+              "message": normalize_ws(str(data["ERROR"]))})
+        return
     pmids = data.get("idlist", [])
     total = int(data.get("count", "0") or 0)
+
+    # PubMed names the phrases it could not match rather than failing on them.
+    # Dropping that turns a diagnosable zero into a mystery: an invented
+    # descriptor and a genuinely empty literature both return a valid-looking
+    # zero, and `querytranslation` cannot separate them — it echoes a bogus MeSH
+    # term exactly as it echoes a real one.
+    wl = data.get("warninglist") or {}
+    el = data.get("errorlist") or {}
+    not_found = list(wl.get("quotedphrasesnotfound") or []) + list(el.get("phrasesnotfound") or [])
 
     result: Dict[str, Any] = {
         "query": term,
@@ -138,10 +161,48 @@ def cmd_search(args) -> None:
         "pmids": pmids,
         "searchUrl": f"https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(term)}",
     }
-    if total == 0:
+    if not_found:
+        result["phrasesNotFound"] = not_found
+
+    # ESearch serves at most ~9,999 records per query and truncates in silence:
+    # ask for 20,000 and 9,999 come back looking like the whole answer. --offset
+    # is no way out either — retstart itself refuses past 9998 — so the only
+    # honest advice is to slice the query up.
+    if len(pmids) < min(args.limit, total):
+        result["notice"] = (
+            f"Asked for {args.limit}; ESearch returned {len(pmids)} of {total:,} "
+            "matches. One query cannot reach past ~9,999 records, and --offset "
+            "cannot either (retstart refuses past 9998). To cover the rest, split "
+            "the search into narrower slices — successive --min-date/--max-date "
+            "windows work well — and combine them. Do not present this page as the "
+            "complete result set."
+        )
+
+    if total == 0 and not_found:
+        result["guidance"] = (
+            "Zero hits because PubMed matched nothing for: " + ", ".join(not_found)
+            + ". Those terms do not exist in the index as written, so this result is "
+            "not evidence that the literature is empty — do not report it as such. "
+            "Resolve them with `mesh` before relaxing any filter. `spell` will not "
+            "help here: it checks spelling against the index, not MeSH validity, so "
+            "on a well-spelled non-descriptor it returns a confident correction that "
+            "is also not a descriptor."
+        )
+    elif total == 0:
         result["guidance"] = (
             "No results. Try spell-checking (spell), removing filters, or "
             "broadening the date range."
+        )
+    elif not_found:
+        # The quiet one: under OR, an unmatched clause costs no hits, so the count
+        # stays healthy and only names the rest of the query. Without a word here
+        # the results look like they answer the search that was asked for.
+        result["guidance"] = (
+            "These hits came back despite PubMed matching nothing for: "
+            + ", ".join(not_found)
+            + ". Those clauses contributed no records, so the count reflects the rest "
+            "of the query, not the search as written. Resolve the terms with `mesh` "
+            "and re-run before reporting these results or the strategy behind them."
         )
     if args.summaries and pmids:
         result["articles"] = _fetch_records(pmids)
@@ -472,6 +533,25 @@ def cmd_epmc_search(args) -> None:
         params["sort"] = args.sort
     resp = external_request(f"{EUROPEPMC_BASE}/search", params)
     data = resp.json()
+    # A request Europe PMC cannot parse — an unrecognized `sort` token is the
+    # easy way in — comes back as HTTP 200 carrying nothing but `version`: no
+    # error, no hitCount, no resultList. Defaulting hitCount to 0 there dresses a
+    # rejected request as "no such literature", which is the one answer nobody
+    # thinks to question.
+    if "hitCount" not in data or "resultList" not in data:
+        _out({
+            "error": "epmc_rejected_request",
+            "command": "epmc-search",
+            "query": full_query,
+            "sort": args.sort or "",
+            "message": "Europe PMC returned no result set at all, meaning it rejected "
+                       "the request rather than finding nothing. The usual cause is an "
+                       "unrecognized --sort token — valid forms look like "
+                       "'P_PDATE_D desc', 'CITED desc', 'PUB_YEAR desc'. Re-run without "
+                       "--sort to confirm before concluding anything about the "
+                       "literature.",
+        })
+        return
     hits = data.get("resultList", {}).get("result", [])
 
     def _journal_title(h: Dict[str, Any]) -> str:
@@ -503,13 +583,23 @@ def cmd_epmc_search(args) -> None:
             row["citedByCount"] = h.get("citedByCount", 0)
         return row
 
-    _out({
+    out: Dict[str, Any] = {
         "query": full_query,
         "hitCount": data.get("hitCount", 0),
         "nextCursorMark": data.get("nextCursorMark", ""),
         "returned": len(hits),
         "results": [_row(h) for h in hits],
-    })
+    }
+    # EPMC serves at most 100 per page, so a larger --limit silently comes back
+    # short. Unlike ESearch's ~9,999 ceiling this one is pageable, so say so.
+    if args.limit > 100:
+        out["notice"] = (
+            f"--limit {args.limit} was requested but Europe PMC caps a page at 100. "
+            f"{len(hits)} came back of {data.get('hitCount', 0):,} matches — page on "
+            "by passing the returned nextCursorMark as --cursor rather than treating "
+            "this page as the full set."
+        )
+    _out(out)
 
 
 # ─── fulltext (PMC EFetch -> Europe PMC -> Unpaywall) ────────────────────────
@@ -761,12 +851,24 @@ def _fulltext_one(identifier: str, kind: str, args) -> Dict[str, Any]:
 
 
 def cmd_fulltext(args) -> None:
-    ids = _clean_ids(args.ids)[:10]  # mirror the MCP server's per-call cap
+    requested = _clean_ids(args.ids)
+    ids = requested[:10]  # mirror the MCP server's per-call cap
     if not ids:
         _out({"error": "No IDs provided."})
         return
     articles = [_fulltext_one(i, args.kind, args) for i in ids]
-    _out({"count": len(articles), "articles": articles})
+    result: Dict[str, Any] = {"count": len(articles), "articles": articles}
+    # Truncating in silence hands back a short list that reads as complete:
+    # `count` reports what ran, not what was asked for, so the dropped IDs look
+    # like articles that simply have no open-access copy.
+    if len(requested) > len(ids):
+        result["notice"] = (
+            f"{len(requested)} IDs were given; only the first {len(ids)} were fetched "
+            f"— this command caps at {len(ids)} per call. Not fetched: "
+            + ", ".join(requested[len(ids):])
+            + ". Re-run for those rather than reporting them as having no full text."
+        )
+    _out(result)
 
 
 # ─── cite (format citations) ─────────────────────────────────────────────────
@@ -836,8 +938,18 @@ def cmd_lookup_cite(args) -> None:
             "status": last if not pmid else "OK",  # NOT_FOUND / AMBIGUOUS
             "raw": line,
         })
-    _out({"count": len(results), "matched": sum(r["matched"] for r in results),
-          "results": results})
+    out: Dict[str, Any] = {"count": len(results),
+                           "matched": sum(r["matched"] for r in results),
+                           "results": results}
+    # Same trap as fulltext: past the cap the extra citations are dropped, and a
+    # caller comparing `count` against its own list is the only way to notice.
+    if args.citation and len(args.citation) > 25:
+        out["notice"] = (
+            f"{len(args.citation)} citations were given; only the first 25 were looked "
+            "up — ECitMatch is capped at 25 per call. Re-run for the rest rather than "
+            "reporting them as unmatched."
+        )
+    _out(out)
 
 
 # ─── mesh (MeSH vocabulary lookup) ───────────────────────────────────────────

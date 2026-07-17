@@ -63,12 +63,25 @@ if the tag comes back expanded — `[Title/Abstract:~3]`, `[Title:~3]`,
   to that descriptor.
 - `hypertension[mh] AND drug therapy[sh]` is **not** the same search. `[sh]`
   only requires the qualifier to appear somewhere in the record, attached to any
-  descriptor, so it returns roughly 10% more and less precisely. Prefer the
+  descriptor, so it returns more and less precisely — the extra hits are ones
+  where the qualifier sits on some other descriptor entirely. Prefer the
   attached form unless the qualifier itself is the subject.
-- Qualifiers are per-descriptor. `Semaglutide/epidemiology[mh]` is illegal and
-  returns zero hits rather than an error — run `mesh <descriptor>` and read
-  `allowableQualifiers` before attaching one. `mesh <qualifier>` works too
-  (`recordType: qualifier`), and its `scopeNote` carries the usage rule.
+- Qualifiers are per-descriptor, and a bad one fails in two ways. Neither is an
+  error, and **neither shows up in `phrasesNotFound`**:
+  - *Real qualifier, illegal pairing.* `Semaglutide/epidemiology[mh]` — a drug
+    takes no epidemiology. Translates verbatim, returns zero, reads exactly like
+    "no such research". Nothing in the output distinguishes it from a legal
+    pairing with no literature.
+  - *No such qualifier.* `Hypertension/nonsense[mh]` is not preserved at all.
+    PubMed drops the `[mh]`, splits the pair, and ATM-expands each half:
+    `("hypertension"[All Fields] OR ...) AND "codon, nonsense"[MeSH Terms]` — 63
+    hits about nonsense codons. Plausible count, unrelated search. Only
+    `queryTranslation` reveals it.
+- So run `mesh <descriptor>` and read `allowableQualifiers` before attaching a
+  qualifier; it is the only check that catches the first case. `mesh <qualifier>`
+  works too (`recordType: qualifier`), and its `scopeNote` carries the usage
+  rule — `drug therapy` says "Used with disease headings", which is why it does
+  not belong on a drug.
 
 ## Common filters (via the `search` subcommand flags)
 
@@ -83,7 +96,9 @@ The `pubmed.py search` command builds these for you:
 - `--free-full-text` → `"free full text"[Filter]`
 - `--min-date 2020/01/01 --max-date 2024/12/31 --date-type pdat`
 
-Date types: `pdat` (publication), `edat` (Entrez/added), `mhda` (MeSH date).
+Date types `--date-type` accepts: `pdat` (publication), `edat` (Entrez/added),
+`mdat` (last modification). `[mhda]` (MeSH date) is a valid tag in a raw query
+string, but the flag rejects it — write it into the query yourself.
 
 ## Europe PMC syntax (epmc-search)
 
@@ -96,11 +111,20 @@ Europe PMC uses its own query language. Useful prefixes:
 - `OPEN_ACCESS:Y` to restrict to OA.
 - `DOI:10.1056/...` exact DOI lookup.
 - Pagination is cursor-based: pass the returned `nextCursorMark` as `--cursor`.
+  A page holds at most 100 records however large `--limit` is.
+- `--sort` takes an EPMC sort token, not free text: `P_PDATE_D desc` (date),
+  `CITED desc` (citations), `PUB_YEAR desc`. An unrecognized token makes EPMC
+  reject the entire request and answer with an empty body — raw, that reads as
+  zero hits; the skill turns it into an `epmc_rejected_request` error instead.
+  If a sorted search suddenly finds nothing, suspect the token before the topic.
 
 ## Tips
 
-- When a search returns zero results, run `spell` on the query, then relax
-  filters (dates, publication types) before concluding there's nothing there.
+- When a search returns zero results, read `phrasesNotFound` first. A term that
+  does not exist in the index explains the zero on its own, and no amount of
+  relaxing filters will fix it. Only if that field is absent should you `spell`
+  the query and relax dates or publication types before concluding there's
+  nothing there.
 - `mesh` resolves free-text concepts to controlled MeSH descriptors — use it to
   find the right `[mh]` term before a precise search.
 - `lookup-cite` is more reliable than free-text search when you already have a
