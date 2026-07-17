@@ -1,7 +1,8 @@
 # PubMed & Europe PMC query syntax reference
 
-Read this when constructing non-trivial searches. For simple keyword searches
-you don't need it.
+Read this before any systematic or exhaustive search, and whenever precision or
+recall is the point rather than a quick look-up. Simple keyword searches don't
+need it.
 
 ## PubMed field tags
 
@@ -16,6 +17,7 @@ Append a bracketed tag to scope a term to a field:
 | `[ta]` | Journal (Title Abbreviation) | `N Engl J Med[ta]` |
 | `[mh]` | MeSH Terms | `Neoplasms[mh]` |
 | `[majr]` | MeSH Major Topic | `Diabetes Mellitus[majr]` |
+| `[sh]` | MeSH Subheading — the qualifier alone, unattached | `drug therapy[sh]` |
 | `[pt]` | Publication Type | `Review[pt]`, `Randomized Controlled Trial[pt]` |
 | `[la]` | Language | `english[la]`, `japanese[la]` |
 | `[dp]` | Date of Publication | `2020:2024[dp]` |
@@ -30,11 +32,43 @@ Append a bracketed tag to scope a term to a field:
 - Parenthesize to control precedence: `(aspirin OR ibuprofen) AND headache`.
 - Phrase search with quotes: `"myocardial infarction"`.
 
+## Proximity search
+
+`"<phrase>"[field:~N]` matches the terms within N words of each other, in any
+order. Supported on `[tiab]`, `[ti]`, and `[ad]` — and nowhere else.
+
+```
+"knee pain"[tiab]        # exact phrase
+"knee pain"[tiab:~3]     # also "pain in the knee", "knee osteoarthritis pain"
+```
+
+Two failure modes, both silent — no error, and a hit count that still looks
+reasonable:
+
+- **A wildcard voids it.** `"knee pain*"[tiab:~3]` runs as `"knee
+  pain*"[Title/Abstract]`. The `:~3` is dropped.
+- **An unsupported field voids it.** `[tw:~3]` drops the `:~N` the same way.
+  `[mh:~3]` and `[majr:~3]` are worse: the tag is left verbatim and matches
+  nothing, so the search returns zero and reads as "no such research".
+
+Confirm from `queryTranslation` in the `search` output. Proximity survived only
+if the tag comes back expanded — `[Title/Abstract:~3]`, `[Title:~3]`,
+`[Affiliation:~2]`. If the `:~N` is missing there, it did not run.
+
 ## MeSH subheadings and explosion
 
 - MeSH terms auto-explode (include narrower terms) by default.
 - Disable explosion: `Neoplasms[mh:noexp]`.
-- Attach a subheading: `Hypertension/drug therapy[mh]`.
+- Attach a subheading: `Hypertension/drug therapy[mh]` — the qualifier is bound
+  to that descriptor.
+- `hypertension[mh] AND drug therapy[sh]` is **not** the same search. `[sh]`
+  only requires the qualifier to appear somewhere in the record, attached to any
+  descriptor, so it returns roughly 10% more and less precisely. Prefer the
+  attached form unless the qualifier itself is the subject.
+- Qualifiers are per-descriptor. `Semaglutide/epidemiology[mh]` is illegal and
+  returns zero hits rather than an error — run `mesh <descriptor>` and read
+  `allowableQualifiers` before attaching one. `mesh <qualifier>` works too
+  (`recordType: qualifier`), and its `scopeNote` carries the usage rule.
 
 ## Common filters (via the `search` subcommand flags)
 

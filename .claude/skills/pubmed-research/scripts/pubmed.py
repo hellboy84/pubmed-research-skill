@@ -126,6 +126,12 @@ def cmd_search(args) -> None:
 
     result: Dict[str, Any] = {
         "query": term,
+        # What PubMed actually ran, which is not always what we sent: a wildcard
+        # inside a proximity phrase drops the `:~N`, and an unrecognized tag is
+        # left verbatim to match nothing. Neither is an error, so `query` alone
+        # is no evidence of the executed search. Anything reporting the search
+        # strategy has to quote this instead.
+        "queryTranslation": data.get("querytranslation", ""),
         "totalCount": total,
         "returned": len(pmids),
         "offset": args.offset,
@@ -890,9 +896,18 @@ def cmd_mesh(args) -> None:
             "uid": uid,
             "name": item.get("ds_meshterms", [uid])[0] if item.get("ds_meshterms") else item.get("ds_meshui", uid),
             "meshUi": item.get("ds_meshui", ""),
+            # 'descriptor' | 'qualifier' | 'supplementary concept'. The mesh db
+            # holds all three and a bare term can match any of them, so callers
+            # cannot tell a subheading from a heading without this.
+            "recordType": item.get("ds_recordtype", ""),
             "scopeNote": item.get("ds_scopenote", ""),
             "treeNumbers": tree_numbers,
             "entryTerms": item.get("ds_meshterms", []),
+            # The qualifiers this descriptor legally takes. An illegal pairing
+            # (Semaglutide/epidemiology) is not rejected — PubMed returns zero
+            # hits, which reads as "no such research" unless the list was checked
+            # first. Empty for qualifier records.
+            "allowableQualifiers": item.get("ds_subheading", []),
         })
     _out({"term": args.term, "totalCount": max(total, len(records)),
           "count": len(records), "records": records})

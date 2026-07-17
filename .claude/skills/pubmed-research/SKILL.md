@@ -45,7 +45,7 @@ the skill. From there every command takes the form
 
 | Subcommand | What it does | Backing API |
 |------------|--------------|-------------|
-| `search` | Search PubMed; returns PMIDs (+ optional full metadata via `--summaries`). Supports author/journal/MeSH/pubtype/language/species/date filters, `--has-abstract`, and `--offset` paging. Multiple `--mesh` terms are AND'd; multiple `--pubtype` values are OR'd. `--min-date`/`--max-date` may be given alone for an open-ended range. | ESearch |
+| `search` | Search PubMed; returns PMIDs (+ optional full metadata via `--summaries`). Supports author/journal/MeSH/pubtype/language/species/date filters, `--has-abstract`, and `--offset` paging. Multiple `--mesh` terms are AND'd; multiple `--pubtype` values are OR'd. `--min-date`/`--max-date` may be given alone for an open-ended range. Output carries `queryTranslation` — read it, see "Building a search strategy". | ESearch |
 | `fetch` | Full metadata for one or more PMIDs: title, structured abstract, authors with deduplicated affiliations, journal, IDs, MeSH, publication types. `--include-grants` adds funding records. Batches up to 200 (auto-POST at ≥100). | EFetch |
 | `fulltext` | Open-access full text for up to 10 PMIDs/PMCIDs/DOIs via a 3-stage chain: **PMC EFetch → Europe PMC fullTextXML → Unpaywall**. Returns structured `sections` for the JATS stages; `--sections`, `--max-sections`, `--include-references` filter them. | PMC / EPMC / Unpaywall |
 | `epmc-search` | Search Europe PMC for preprints (`PPR`), patents (`PAT`), Agricola (`AGR`), and EPMC-only OA records that don't surface in PubMed. Cursor paging via `--cursor`; `--sort`, `--result-type`. | Europe PMC |
@@ -53,7 +53,7 @@ the skill. From there every command takes the form
 | `related` | Find `similar`, `cited_by`, or `references` articles for a source PMID, with `--offset` paging. Returns brief summaries by default (`--fetch` for full metadata, `--pmids-only` for IDs). Provider chain: ELink, then Europe PMC (`cited_by`/`references` only), then OpenAlex. First success wins; results are never merged. | ELink → Europe PMC → OpenAlex |
 | `cite` | Format citations for PMIDs. Default style **vancouver**; also `apa`, `mla`, `bibtex`, `ris` (pass multiple with `--style`). | EFetch + in-code formatting |
 | `lookup-cite` | Resolve a partial reference (journal/year/volume/page/author) to a PMID — deterministic matching, more reliable than free-text search. Batch up to 25 with repeated `--citation`. | ECitMatch |
-| `mesh` | Search the MeSH controlled vocabulary; returns descriptors, tree numbers, scope notes, entry terms. An exact heading match is hoisted to the front of the list. | ESearch/ESummary (mesh db) |
+| `mesh` | Search the MeSH vocabulary — descriptors **and** qualifiers/subheadings, told apart by `recordType`. Returns tree numbers, scope notes, entry terms, and on a descriptor the `allowableQualifiers` it legally takes. An exact heading match is hoisted to the front of the list. | ESearch/ESummary (mesh db) |
 | `spell` | Spell-check a query and get NCBI's suggested correction. | ESpell |
 
 Every subcommand prints JSON on stdout. Failures print a JSON object with an
@@ -122,6 +122,34 @@ even when the data exists. An empty `similar` needs no retry. A `notice` naming
 an unknown source PMID means the ID itself is wrong, not that the article has no
 neighbors.
 
+## Building a search strategy
+
+The `search` flags emit `[MeSH Terms]`, `[Publication Type]`, `[Author]`,
+`[Journal]`, `[Language]` and a date range — nothing else. That is a precision
+search over well-indexed topics, and it is the whole flag surface, so building a
+query from flags alone quietly settles for it. Everything below needs raw syntax
+in the query string, which passes through to ESearch untouched.
+
+- **MeSH alone under-recalls.** Indexing lags publication by weeks to months, so
+  a MeSH-only query drops the newest articles — often the ones being asked
+  about. Where recall matters, OR the MeSH clause with text terms:
+  `("Obesity"[MeSH Terms] OR obesity[tiab] OR overweight[tiab])`. Say which of
+  precision or recall the query was built for.
+- **`[majr]`** restricts to articles where the concept is a major topic — reach
+  for it when a precision search returns too much noise. `--mesh` cannot emit it.
+- **Subheadings** narrow a descriptor to one aspect: `Hypertension/drug
+  therapy[mh]`. Run `mesh` on the descriptor first and read
+  `allowableQualifiers`; an illegal pairing returns zero hits, not an error.
+  `drug therapy[sh]` is a different search — the qualifier need not attach to
+  the descriptor you meant.
+- **Report `queryTranslation`, never the `query` you sent.** PubMed rewrites
+  silently and without error: a wildcard inside a proximity phrase drops the
+  `:~N`, `[tw:~3]` drops it too, and `[mh:~3]` is left verbatim to match
+  nothing. A plausible hit count is not evidence the query ran as written.
+- For field tags, proximity, explosion and Europe PMC prefixes, read
+  `references/query_syntax.md`. Read it before any systematic or exhaustive
+  search — not only when the syntax is already known to be non-trivial.
+
 ## Guidance for good results
 
 - When a search returns zero hits, don't stop — run `spell` on the query, then
@@ -130,8 +158,6 @@ neighbors.
 - Prefer `mesh` to pin down controlled vocabulary before a precision search, and
   `lookup-cite` over free-text search when the user already has a structured
   reference.
-- For query syntax (field tags, boolean operators, MeSH explosion/subheadings,
-  Europe PMC prefixes), read `references/query_syntax.md`.
 - Respect the rate limit — the scripts pace requests automatically, so avoid
   launching many overlapping invocations in parallel.
 - Every subcommand emits JSON; to post-process, parse that JSON rather than
