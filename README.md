@@ -15,7 +15,7 @@ PubMed の文献検索・取得・CSV 出力を AI にまかせるための
 
 - 生成されたレポート：[semaglutide_obesity_report.md](SAMPLE/semaglutide_obesity_report.md) 引用文献付き。使用した検索式とヒット件数も収録
 - 生成された文献リスト：[semaglutide_obesity_20refs.csv](SAMPLE/semaglutide_obesity_20refs.csv) 20件×18列（GitHub上では表として表示されます）
-
+- 使用したAI：Claude Opus 4.8
 
 ## 本Skillに含まれる11個のツール
 
