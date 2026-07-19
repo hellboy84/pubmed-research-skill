@@ -1,0 +1,26 @@
+# Force LF for all text files (required because this folder is shared
+# byte-for-byte across Windows/Mac via OneDrive).
+* text=auto eol=lf
+
+# Binary files: never touch bytes, never line-ending convert, no text diff.
+# Images
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.bmp   binary
+*.ico   binary
+*.webp  binary
+# Office / documents
+*.pdf   binary
+*.xlsx  binary
+*.xls   binary
+*.docx  binary
+*.doc   binary
+*.pptx  binary
+*.ppt   binary
+# Archives
+*.zip   binary
+*.gz    binary
+*.tar   binary
+*.7z    binary
