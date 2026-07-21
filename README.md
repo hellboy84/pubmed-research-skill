@@ -78,14 +78,12 @@ pip install -r .claude/skills/pubmed-research/requirements.txt
 
 ## 出典・謝辞
 
-このスキルは、以下の 2 つのプロジェクトをもとにしています。
+このスキルは、以下の 2 つのプロジェクトを参照しています。
 
 **[`cyanheads/pubmed-mcp-server`](https://github.com/cyanheads/pubmed-mcp-server)**
 （Copyright 2025 Casey Hand @cyanheads、Apache License 2.0）
 
-同 MCP サーバーの 10 個のツール構成を Python で独立に再実装したものです。同プロジェクトは
-TypeScript 製で、ソースコードの複製は一切していません。ただし公開ソースを参照しており、
-次の設計は同プロジェクトに由来します。
+本Skillのツールは、同 MCP サーバーの 10 個のツール構成を Python で独立に再実装したものです。同プロジェクトは TypeScript 製で、ソースコードの複製は一切していません。ただし公開ソースを参照しており、次の設計は同プロジェクトに由来します。
 
 - 10 個のツールの構成とその意味づけ
 - `fulltext` の探索順（PMC E-utilities → Europe PMC fullTextXML → Unpaywall）と
